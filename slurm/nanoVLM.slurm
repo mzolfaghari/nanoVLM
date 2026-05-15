@@ -50,6 +50,7 @@ eval "$(conda shell.bash hook)"
 conda activate vlm-distill
 
 export TOKENIZERS_PARALLELISM=false
+export HF_TOKEN=""  # get yours at https://huggingface.co/settings/tokens
 
 # -------------------------------------------------------------------------------
 
