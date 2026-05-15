@@ -645,6 +645,7 @@ def main():
     parser.add_argument('--resume_from_vlm_checkpoint', type=bool, default=False, help='Resume training from VLM checkpoint specified by vlm_checkpoint_path (or default if not provided)')
     parser.add_argument('--no_log_wandb', action='store_true', help='Do not log to wandb')
     parser.add_argument('--train_dataset_path', type=str, help='Train dataset path')
+    parser.add_argument('--train_dataset_name', type=str, help='Dataset config name (e.g. "default", "scienceqa", "all")')
     parser.add_argument('--relevance_min_rating', type=int, help='Minimum relevance rating of images per sample')
     parser.add_argument('--image_correspondence_min_rating', type=int, help='Minimum image correspondence rating of images per sample')
     parser.add_argument('--visual_dependency_min_rating', type=int, help='Minimum visual dependency rating of images per sample')
@@ -669,6 +670,8 @@ def main():
         train_cfg.log_wandb = False
     if args.train_dataset_path is not None:
         train_cfg.train_dataset_path = args.train_dataset_path
+    if args.train_dataset_name is not None:
+        train_cfg.train_dataset_name = (args.train_dataset_name,)
     if args.relevance_min_rating is not None:
         train_cfg.relevance_min_rating = args.relevance_min_rating
     if args.image_correspondence_min_rating is not None:
