@@ -73,7 +73,7 @@ class TrainConfig:
     compile: bool = False
     resume_from_vlm_checkpoint: bool = False # Indicate if the training should be resumed from a checkpoint of the whole VLM or you want to start from scratch
     train_dataset_path: str = 'HuggingFaceM4/FineVision_concat_shuffled_2'
-    train_dataset_name: tuple[str, ...] = ("default", ) #('allava_laion', 'allava_vflan', 'cambrian(filtered)_processed', 'LLaVA_Instruct_150K', 'mmevol', 'sharegpt4o', 'sharegpt4v(coco)', 'sharegpt4v(knowledge)', 'sharegpt4v(llava)', 'sharegpt4v(sam)') # 'vision_flan(filtered)', 'lvis_instruct4v',
+    train_dataset_name: tuple[str, ...] = ("scienceqa", ) # use "default" for FineVision, "all" for all cauldron subsets
     stream_dataset: bool = True
     relevance_min_rating: int = 1
     image_correspondence_min_rating: int = 1
