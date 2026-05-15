@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=train_nanoVLM_torchrun
+#SBATCH --chdir=/home/reza/projects/nanoVLM
 #SBATCH --output=logs/train_nanoVLM/%A_%a.out
 #SBATCH --error=logs/train_nanoVLM/%A_%a.err
 #SBATCH --time=95:59:00
@@ -7,7 +8,10 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=88
-#SBATCH --partition=hopper-prod
+# Partition: `VLM` matches your sinfo; use `main` for the default (*) pool if preferred.
+#SBATCH --partition=VLM
+# GPU GRES on your nodes: gpu:nvidia_h100_80gb_hbm3:8 — if jobs fail to allocate, try
+# replacing `--gpus-per-node=8` with:  #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3:8
 #SBATCH --qos=normal
 
 # echo "--- Starting parallel data copy on all nodes... ---"
@@ -34,13 +38,17 @@ export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=0
 export NCCL_DEBUG=WARN
 
-module load cuda/12.9
+# Optional: uncomment and adjust for your cluster's module system.
+# module load cuda/12.9
 
-# Change to project directory
-cd /fsx/andi/nanoVLM
-source .venv/bin/activate
+mkdir -p logs/train_nanoVLM
 
-# Activate virtual environment
+cd /home/reza/projects/nanoVLM
+
+# Conda (non-interactive batch): hook then activate
+eval "$(conda shell.bash hook)"
+conda activate vlm-distill
+
 export TOKENIZERS_PARALLELISM=false
 
 # -------------------------------------------------------------------------------
