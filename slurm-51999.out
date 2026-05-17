@@ -1,0 +1,99 @@
+Traceback (most recent call last):
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/utils/_http.py", line 403, in hf_raise_for_status
+    response.raise_for_status()
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/requests/models.py", line 1028, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://huggingface.co/datasets/HuggingFaceM4/the_cauldron/resolve/847a98a779b1652d65111daf20c972dfcd333605/aokvqa/train-00000-of-00002-88e828b9a932c295.parquet
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1550, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1467, in get_hf_file_metadata
+    r = _request_wrapper(
+        ^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+               ^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/utils/_http.py", line 476, in hf_raise_for_status
+    raise _format(HfHubHTTPError, str(e), response) from e
+huggingface_hub.errors.HfHubHTTPError: 429 Client Error: Too Many Requests for url: https://huggingface.co/datasets/HuggingFaceM4/the_cauldron/resolve/847a98a779b1652d65111daf20c972dfcd333605/aokvqa/train-00000-of-00002-88e828b9a932c295.parquet (Request ID: Root=1-6a073115-70267604368b33da161ef1ca;199ed374-2d0e-4869-9dc0-4d5ac3349f2e)
+
+We had to rate limit you, you hit the quota of 5000 resolvers requests per 5 minutes period. Upgrade to a PRO user or Team/Enterprise organization account (https://hf.co/pricing) to get higher limits. See https://huggingface.co/docs/hub/rate-limits
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/file_utils.py", line 188, in cached_path
+    ).hf_hub_download(
+      ^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/hf_api.py", line 5467, in hf_hub_download
+    return hf_hub_download(
+           ^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1014, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1121, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/huggingface_hub/file_download.py", line 1665, in _raise_on_head_call_error
+    raise LocalEntryNotFoundError(
+huggingface_hub.errors.LocalEntryNotFoundError: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<string>", line 7, in <module>
+  File "<string>", line 7, in <listcomp>
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/load.py", line 1708, in load_dataset
+    builder_instance.download_and_prepare(
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/builder.py", line 882, in download_and_prepare
+    self._download_and_prepare(
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/builder.py", line 921, in _download_and_prepare
+    split_generators: list[SplitGenerator] = self._split_generators(dl_manager, **split_generators_kwargs)
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/packaged_modules/parquet/parquet.py", line 110, in _split_generators
+    data_files = dl_manager.download(self.config.data_files)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/download/download_manager.py", line 159, in download
+    downloaded_path_or_paths = map_nested(
+                               ^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 502, in map_nested
+    mapped = [
+             ^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 503, in <listcomp>
+    map_nested(
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 519, in map_nested
+    mapped = [
+             ^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 520, in <listcomp>
+    _single_map_nested((function, obj, batched, batch_size, types, None, True, None))
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 388, in _single_map_nested
+    return [mapped_item for batch in iter_batched(data_struct, batch_size) for mapped_item in function(batch)]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/py_utils.py", line 388, in <listcomp>
+    return [mapped_item for batch in iter_batched(data_struct, batch_size) for mapped_item in function(batch)]
+                                                                                              ^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/download/download_manager.py", line 219, in _download_batched
+    return [
+           ^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/download/download_manager.py", line 220, in <listcomp>
+    self._download_single(url_or_filename, download_config=download_config)
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/download/download_manager.py", line 229, in _download_single
+    out = cached_path(url_or_filename, download_config=download_config)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/reza/miniconda3/envs/vlm-distill/lib/python3.11/site-packages/datasets/utils/file_utils.py", line 202, in cached_path
+    raise FileNotFoundError(str(e)) from e
+FileNotFoundError: An error happened while trying to locate the file on the Hub and we cannot find the requested files in the local cache. Please check your connection and try again or make sure your Internet connection is on.

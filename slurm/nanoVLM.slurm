@@ -8,8 +8,8 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=88
-# Partition: `VLM` matches your sinfo; use `main` for the default (*) pool if preferred.
-#SBATCH --partition=VLM
+# Partition: `main` — override if your site uses a different default pool.
+#SBATCH --partition=main
 # GPU GRES on your nodes: gpu:nvidia_h100_80gb_hbm3:8 — if jobs fail to allocate, try
 # replacing `--gpus-per-node=8` with:  #SBATCH --gres=gpu:nvidia_h100_80gb_hbm3:8
 #SBATCH --qos=normal
@@ -50,7 +50,8 @@ eval "$(conda shell.bash hook)"
 conda activate vlm-distill
 
 export TOKENIZERS_PARALLELISM=false
-export HF_TOKEN="YOUR_TOKEN_HERE"  # get yours at https://huggingface.co/settings/tokens
+# Token weights still load from the Hub unless cached — set before sbatch if needed:
+# export HF_TOKEN=$(cat ~/.cache/huggingface/token 2>/dev/null)
 
 # -------------------------------------------------------------------------------
 
@@ -79,6 +80,6 @@ srun torchrun --nproc_per_node=$SLURM_GPUS_PER_NODE \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     train.py \
     --no_log_wandb \
-    --train_dataset_path HuggingFaceM4/the_cauldron \
-    --train_dataset_name all
+    --train_dataset_path /home/khashmi/data/qvac-vlm/finevision_doc_filter/presampled_dataset/fvdoc_v1_45-30-20-5_2026-05-12_imgcast \
+    --train_dataset_name default
 

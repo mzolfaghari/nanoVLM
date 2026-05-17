@@ -17,7 +17,7 @@ from datetime import timedelta
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler
-from datasets import load_dataset, concatenate_datasets, get_dataset_config_names, load_from_disk
+from datasets import load_dataset, concatenate_datasets, get_dataset_config_names, load_from_disk, DatasetDict
 
 torch.manual_seed(0)
 if torch.cuda.is_available():
@@ -111,45 +111,69 @@ def get_run_name(train_cfg, vlm_cfg):
 
     return f"nanoVLM_{vit}_{mp}_{llm}_{num_gpus}_{batch_size}_{max_training_steps}_{learning_rate}_{date}"
 
+def _load_hf_dataset_saved_to_disk(path: str):
+    """Load a Hugging Face Dataset saved with Dataset.save_to_disk (directory with dataset_info.json)."""
+    raw = load_from_disk(path)
+    if isinstance(raw, DatasetDict):
+        if "train" in raw:
+            return raw["train"]
+        first_key = next(iter(raw.keys()))
+        return raw[first_key]
+    return raw
+
 def get_dataloaders(train_cfg, vlm_cfg):
     print(f"Getting dataloaders from {train_cfg.train_dataset_path}")
     # Create datasets
     image_processor = get_image_processor(vlm_cfg.max_img_size, vlm_cfg.vit_img_size, vlm_cfg.resize_to_max_side_len)
     tokenizer = get_tokenizer(vlm_cfg.lm_tokenizer, vlm_cfg.vlm_extra_tokens, vlm_cfg.lm_chat_template)
 
-    dataset_names_to_load = train_cfg.train_dataset_name
-    if "shards" in train_cfg.train_dataset_name:
-        print("Loading shards")
-        total_shards = 56
-        dataset_names_to_load = [train_cfg.train_dataset_path + f"/shard_{i}" for i in range(total_shards)]
-
-    if "all" in dataset_names_to_load:
-        dataset_names_to_load = get_dataset_config_names(train_cfg.train_dataset_path)
-
-    # Load and combine all training datasets
     combined_train_data = []
+    dataset_path = train_cfg.train_dataset_path
+    dataset_info = os.path.join(dataset_path, "dataset_info.json")
 
-    for dataset_name in dataset_names_to_load:
-        print(f"Loading dataset: {dataset_name}")
-        if "shard_" in dataset_name:
-            try:
-                train_ds = load_from_disk(dataset_name)
-                combined_train_data.append(train_ds)
-                continue
-            except Exception as e:
-                print(f"Warning: Failed to load dataset shard '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
-                continue
+    if os.path.isdir(dataset_path) and os.path.isfile(dataset_info):
+        if train_cfg.stream_dataset and is_master():
+            print("Warning: stream_dataset is ignored when loading a Dataset from disk (map-style).")
+        print(f"Loading Hugging Face dataset from disk: {dataset_path}")
         try:
-            train_ds = load_dataset(train_cfg.train_dataset_path, dataset_name, streaming=train_cfg.stream_dataset, on_bad_files='warn')['train']
-            if train_cfg.stream_dataset:
-                next(iter(train_ds)) # Check if the dataset is loaded correctly
-            else:
-                train_ds[0] # Check if the dataset is loaded correctly
+            train_ds = _load_hf_dataset_saved_to_disk(dataset_path)
+            train_ds[0]
             combined_train_data.append(train_ds)
         except Exception as e:
             if is_master():
-                print(f"Warning: Failed to load dataset config '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
-            continue
+                print(f"Warning: Failed to load dataset from disk '{dataset_path}'. Error: {e}")
+
+    if not combined_train_data:
+        dataset_names_to_load = train_cfg.train_dataset_name
+        if "shards" in train_cfg.train_dataset_name:
+            print("Loading shards")
+            total_shards = 56
+            dataset_names_to_load = [train_cfg.train_dataset_path + f"/shard_{i}" for i in range(total_shards)]
+
+        if "all" in dataset_names_to_load:
+            dataset_names_to_load = get_dataset_config_names(train_cfg.train_dataset_path)
+
+        for dataset_name in dataset_names_to_load:
+            print(f"Loading dataset: {dataset_name}")
+            if "shard_" in dataset_name:
+                try:
+                    train_ds = load_from_disk(dataset_name)
+                    combined_train_data.append(train_ds)
+                    continue
+                except Exception as e:
+                    print(f"Warning: Failed to load dataset shard '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
+                    continue
+            try:
+                train_ds = load_dataset(train_cfg.train_dataset_path, dataset_name, streaming=train_cfg.stream_dataset, on_bad_files='warn')['train']
+                if train_cfg.stream_dataset:
+                    next(iter(train_ds)) # Check if the dataset is loaded correctly
+                else:
+                    train_ds[0] # Check if the dataset is loaded correctly
+                combined_train_data.append(train_ds)
+            except Exception as e:
+                if is_master():
+                    print(f"Warning: Failed to load dataset config '{dataset_name}' from '{train_cfg.train_dataset_path}'. Error: {e}")
+                continue
 
     if not combined_train_data:
         raise ValueError("No valid datasets were loaded. Please check your dataset path and configurations.")
@@ -370,7 +394,8 @@ def train(train_cfg, vlm_cfg):
         optimizer.zero_grad()
         data_load_start = time.time()
 
-        print("Starting training loop")
+        print("Starting training loop", flush=True)
+        train_heartbeat_microbatches = 25
         for i, batch in enumerate(synchronized_dataloader_step(iter_train_loader, is_dist())):
             is_update_step = (i + 1) % train_cfg.gradient_accumulation_steps == 0
             batch_start_time = time.time()
@@ -442,6 +467,21 @@ def train(train_cfg, vlm_cfg):
             batch_end_time = time.time()
             batch_duration = batch_end_time - batch_start_time
             tokens_per_second = get_world_size() * num_tokens / batch_duration  # Multiply by world size to get global tokens/s
+
+            if is_master():
+                if i == 0:
+                    n_img_tensors = sum(len(sub) for sub in images)
+                    print(
+                        f"[train] First micro-batch in: input_ids={tuple(input_ids.shape)} "
+                        f"image_lists={len(images)} total_img_tensors={n_img_tensors} epoch={epoch}",
+                        flush=True,
+                    )
+                elif (i + 1) % train_heartbeat_microbatches == 0:
+                    print(
+                        f"[train] heartbeat micro_batch={i+1} global_step={global_step} "
+                        f"batch_loss={batch_loss:.4f} tok/s≈{tokens_per_second:.0f}",
+                        flush=True,
+                    )
 
             # Accumulate training stats
             accumulated_stats['tokens_per_second'].append(tokens_per_second)

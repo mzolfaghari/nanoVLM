@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=lmms_eval
+#SBATCH --chdir=/home/reza/projects/nanoVLM
 #SBATCH --output=logs/lmms_eval/%j.out
 #SBATCH --error=logs/lmms_eval/%j.err
 #SBATCH --time=24:00:00
@@ -7,17 +8,18 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4                  # request as many GPUs as you want to use in parallel
 #SBATCH --cpus-per-task=44            # total CPUs for the whole allocation
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=main
 #SBATCH --qos=normal
-#SBATCH --gres-flags=enforce-binding
+# If your site supports enforce-binding, add: #SBATCH --gres-flags=enforce-binding
 
 set -euo pipefail
 
 # Clean distributed defaults that can confuse eval scripts
 unset RANK LOCAL_RANK WORLD_SIZE MASTER_ADDR MASTER_PORT NCCL_SOCKET_IFNAME
 
-cd /fsx/andi/nanoVLM
-source .venv/bin/activate
+cd /home/reza/projects/nanoVLM
+eval "$(conda shell.bash hook)"
+conda activate vlm-distill
 export TOKENIZERS_PARALLELISM=false
 
 if [ "$#" -ne 6 ]; then

@@ -4,7 +4,7 @@
 #SBATCH --error=logs/train_nanoVLM/%A_%a.err
 #SBATCH --time=14:00:00
 #SBATCH --gpus=1
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=main
 #SBATCH --qos=normal
 
 cd /fsx/luis_wiedmann/nanoVLM

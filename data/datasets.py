@@ -6,7 +6,7 @@ import logging
 
 
 class BaseDataset(Dataset):
-    def __init__(self, dataset, tokenizer, image_processor, mp_image_token_length, relevance_min_rating=1, image_correspondence_min_rating=1, visual_dependency_min_rating=1, formatting_min_rating=1):
+    def __init__(self, dataset, tokenizer, image_processor, mp_image_token_length, relevance_min_rating=1, image_correspondence_min_rating=1, visual_dependency_min_rating=1, formatting_min_rating=1, max_chat_tokens=None):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.image_processor = image_processor
@@ -15,6 +15,13 @@ class BaseDataset(Dataset):
         self.image_correspondence_min_rating = image_correspondence_min_rating
         self.visual_dependency_min_rating = visual_dependency_min_rating
         self.formatting_min_rating = formatting_min_rating
+        tok_max = getattr(self.tokenizer, "model_max_length", None)
+        if tok_max is None or tok_max > 1_000_000:
+            tok_max = 8192
+        if max_chat_tokens is not None:
+            self.max_chat_tokens = min(int(max_chat_tokens), int(tok_max))
+        else:
+            self.max_chat_tokens = int(tok_max)
         self.prefix_len = self._get_prefix_len()
 
     def __len__(self):
@@ -84,6 +91,15 @@ class BaseDataset(Dataset):
             add_special_tokens=False,
             return_dict=True,
         )
+        max_len = self.max_chat_tokens
+        if len(conv_ids["input_ids"]) > max_len:
+            logging.warning(
+                "Dropping sample: conversation still longer than max_chat_tokens after trimming (%s tokens > %s).",
+                len(conv_ids["input_ids"]),
+                max_len,
+            )
+            return None, None, None
+
         mask = [0] * len(conv_ids["input_ids"])
 
         # Locate each assistant turn and flip its mask to 1
@@ -132,7 +148,10 @@ class VQADataset(BaseDataset):  # Visual Question Answering Dataset
         if len(messages) == 0:
             return None
 
-        input_ids, mask, attention_mask = self._prepare_inputs_and_loss_mask(messages)
+        packed = self._prepare_inputs_and_loss_mask(messages)
+        if packed[0] is None:
+            return None
+        input_ids, mask, attention_mask = packed
         labels = self._get_labels(input_ids, mask)
 
         return {

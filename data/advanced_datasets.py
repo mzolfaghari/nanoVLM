@@ -60,6 +60,9 @@ class ConstantLengthDataset(IterableDataset):
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
+        # New iterator / producer each epoch — log first pack per worker (helps when num_workers>1)
+        self._pack_logged_workers = set()
+
         def make_base_iterator():
             """Return a (sharded) iterator over the underlying dataset."""
             if not hasattr(self.dataset.dataset, "__len__"):
@@ -85,7 +88,7 @@ class ConstantLengthDataset(IterableDataset):
         queue: Queue = Queue(maxsize=self.queue_size)
 
         producer = threading.Thread(
-            target=self._producer, args=(make_base_iterator, queue), daemon=True
+            target=self._producer, args=(make_base_iterator, queue, worker_id), daemon=True
         )
         producer.start()
 
@@ -100,6 +103,7 @@ class ConstantLengthDataset(IterableDataset):
         self,
         make_iterator,  # a zero-arg lambda that returns a fresh (possibly sharded) iterator
         queue: Queue,
+        worker_id: int = 0,
     ):
         """Runs in a separate daemon thread and keeps `queue` full."""
         iterator = make_iterator()
@@ -165,6 +169,13 @@ class ConstantLengthDataset(IterableDataset):
                 })
 
             if packed_group:
+                if worker_id not in self._pack_logged_workers:
+                    print(
+                        f"[data] ConstantLengthDataset worker {worker_id}: first packed group "
+                        f"({len(packed_group)} seqs, token budget≈{self.max_length}).",
+                        flush=True,
+                    )
+                    self._pack_logged_workers.add(worker_id)
                 queue.put(packed_group)
 
         # finished → unblock consumer

@@ -5,7 +5,7 @@
 #SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --gpus=8
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=main
 #SBATCH --qos=normal
 
 # Change to project directory

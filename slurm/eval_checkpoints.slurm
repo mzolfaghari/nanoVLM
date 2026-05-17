@@ -4,7 +4,7 @@
 #SBATCH --error=logs/eval_new/%A_%a.err
 #SBATCH --time=48:00:00
 #SBATCH --gpus=1
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=main
 #SBATCH --qos=normal
 #SBATCH --array=0
 #SBATCH --mail-type=FAIL,ARRAY_TASKS

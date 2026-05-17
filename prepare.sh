@@ -7,7 +7,7 @@
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=88
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=main
 #SBATCH --qos=high
 #SBATCH --array=4
 
