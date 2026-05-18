@@ -135,11 +135,34 @@ class SmolVLM2Teacher(BaseTeacher):
         all_logits: List[torch.Tensor] = []
 
         for imgs, conv, answer_text in zip(raw_images, raw_conversations, raw_answers):
-            # Build full conversation: prompt + answer
-            full_conv = conv + [{"role": "assistant", "content": answer_text}]
+            # Build the teacher conversation in SmolVLM2's multimodal format.
+            # SmolVLM2's processor requires {"type": "image"} blocks in the
+            # content list of whichever message contains images — passing PIL
+            # images separately without corresponding tokens raises a mismatch
+            # error ("number of images in text [0] and images [N] differ").
+            teacher_conv = []
+            images_injected = False
+            for msg in conv:
+                if msg["role"] == "user" and not images_injected and imgs:
+                    # First user turn: prepend one {"type":"image"} per PIL image
+                    content: list = [{"type": "image"} for _ in imgs]
+                    content.append({"type": "text", "text": msg["content"]})
+                    teacher_conv.append({"role": "user", "content": content})
+                    images_injected = True
+                else:
+                    teacher_conv.append(msg)
+
+            # If there were no user turns (shouldn't happen), just add a bare user msg
+            if not teacher_conv and imgs:
+                content = [{"type": "image"} for _ in imgs]
+                content.append({"type": "text", "text": ""})
+                teacher_conv.append({"role": "user", "content": content})
+
+            # Append ground-truth answer as the assistant turn
+            teacher_conv.append({"role": "assistant", "content": answer_text})
 
             text = self.processor.apply_chat_template(
-                full_conv,
+                teacher_conv,
                 tokenize=False,
                 add_generation_prompt=False,
             )
