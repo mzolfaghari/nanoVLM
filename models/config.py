@@ -126,7 +126,7 @@ class DistillConfig:
     # ── Data pipeline ─────────────────────────────────────────────────────────
     # Packing (ConstantLengthDataset) must be disabled: teacher needs one sample
     # at a time to align its sequence positions with the student's answer span.
-    max_sample_length: int = 2048
+    max_sample_length: int = 4096
 
     # ── Multi-teacher (future) ────────────────────────────────────────────────
     # Comma-separated model IDs for EnsembleTeacher, e.g.:

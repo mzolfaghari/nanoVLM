@@ -85,7 +85,7 @@ srun torchrun \
     --ce_weight 1.0 \
     --temperature 2.0 \
     --weighting_strategy equal \
-    --max_sample_length 2048 \
+    --max_sample_length 4096 \
     --batch_size 2 \
     --gradient_accumulation_steps 8 \
     --max_training_steps 5000 \
