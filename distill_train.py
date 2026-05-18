@@ -280,21 +280,40 @@ def gather_answer_logits(
     max_ans_len: int,
 ) -> torch.Tensor:
     """
-    Select logits at the positions where answer_mask == True, and return them
-    as a dense [B, max_ans_len, V] tensor (zero-padded for shorter answers).
-
-    This converts the student's full-sequence logits into the same shape as the
-    teacher's answer-only logit tensor so that the KD loss can be applied
-    element-wise without index gymnastics.
+    Select logits at positions where answer_mask == True.
+    Returns [B, max_ans_len, V], zero-padded for shorter answers.
     """
     B, T, V = logits.shape
     out = torch.zeros(B, max_ans_len, V, dtype=logits.dtype, device=logits.device)
     for b in range(B):
-        positions = answer_mask[b].nonzero(as_tuple=False).squeeze(-1)  # [n_ans]
+        positions = answer_mask[b].nonzero(as_tuple=False).squeeze(-1)
         n = min(positions.size(0), max_ans_len)
         if n > 0:
             out[b, :n] = logits[b, positions[:n]]
     return out  # [B, max_ans_len, V]
+
+
+def gather_answer_labels(
+    labels: torch.Tensor,      # [B, T_seq]  (−100 for non-answer)
+    answer_mask: torch.Tensor, # [B, T_seq]  bool
+    max_ans_len: int,
+) -> torch.Tensor:
+    """
+    Extract the ground-truth token IDs at answer positions.
+    Returns [B, max_ans_len], padded with −100 (ignore index) for unused slots.
+
+    Required by DKD which needs the GT token at each answer position to build
+    the target-class mask. The returned tensor matches the shape of s_ans.
+    """
+    B, T = labels.shape
+    out = torch.full((B, max_ans_len), fill_value=-100,
+                     dtype=labels.dtype, device=labels.device)
+    for b in range(B):
+        positions = answer_mask[b].nonzero(as_tuple=False).squeeze(-1)
+        n = min(positions.size(0), max_ans_len)
+        if n > 0:
+            out[b, :n] = labels[b, positions[:n]]
+    return out  # [B, max_ans_len]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -500,6 +519,11 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                     s_base = student_logits[:, :, :distill_cfg.base_vocab_size]  # [B, T_seq, 49152]
                     s_ans  = gather_answer_logits(s_base, answer_mask, T_answer)  # [B, T_ans, 49152]
 
+                    # Extract answer-position labels [B, T_ans] for DKD.
+                    # DKD needs GT token IDs shaped to match s_ans — passing the
+                    # full [B, T_seq] labels would cause a shape mismatch crash.
+                    ans_labels = gather_answer_labels(labels, answer_mask, T_answer)
+
                     # Build a mask over the teacher's answer dimension
                     # (zero-padded positions have all-zero logit rows)
                     t_ans_mask = (teacher_logits.abs().sum(-1) > 0).float()  # [B, T_ans]
@@ -518,7 +542,10 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                         # DKD params
                         dkd_alpha=distill_cfg.dkd_alpha,
                         dkd_beta=distill_cfg.dkd_beta,
-                        labels=labels,
+                        labels=ans_labels,
+                        # JS / skew_fkl params
+                        js_teacher_weight=getattr(distill_cfg, 'js_teacher_weight', 0.1),
+                        skew_target_weight=getattr(distill_cfg, 'skew_target_weight', 0.1),
                     )
 
                     # Combine losses
@@ -630,9 +657,10 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                         v_T_answer = v_teacher_logits.size(1)
 
                         with autocast_context:
-                            v_s_base = v_student_logits[:, :, :distill_cfg.base_vocab_size]
-                            v_s_ans  = gather_answer_logits(v_s_base, v_answer_mask, v_T_answer)
-                            v_t_mask = (v_teacher_logits.abs().sum(-1) > 0).float()
+                            v_s_base     = v_student_logits[:, :, :distill_cfg.base_vocab_size]
+                            v_s_ans      = gather_answer_logits(v_s_base, v_answer_mask, v_T_answer)
+                            v_ans_labels = gather_answer_labels(v_labels, v_answer_mask, v_T_answer)
+                            v_t_mask     = (v_teacher_logits.abs().sum(-1) > 0).float()
                             v_kd_loss = kd_loss_fn(
                                 student_logits=v_s_ans.float(),
                                 teacher_logits=v_teacher_logits.float(),
@@ -644,7 +672,9 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                                 total_steps=train_cfg.max_training_steps,
                                 dkd_alpha=distill_cfg.dkd_alpha,
                                 dkd_beta=distill_cfg.dkd_beta,
-                                labels=v_labels,
+                                labels=v_ans_labels,
+                                js_teacher_weight=getattr(distill_cfg, 'js_teacher_weight', 0.1),
+                                skew_target_weight=getattr(distill_cfg, 'skew_target_weight', 0.1),
                             )
                             v_losses = []
                             if distill_cfg.ce_weight > 0 and v_ce_loss is not None:
@@ -742,10 +772,6 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
     # ── End of training ────────────────────────────────────────────────────────
     if is_master():
         print("Training complete.")
-        if best_model_path and vlm_cfg.hf_repo_name:
-            print(f"Pushing best model from {best_model_path} to Hub...")
-            hf_model = VisionLanguageModel.from_pretrained(best_model_path)
-            hf_model.push_to_hub(vlm_cfg.hf_repo_name)
         if train_cfg.log_wandb:
             run.finish()
 

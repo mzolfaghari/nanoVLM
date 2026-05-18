@@ -14,12 +14,17 @@ Logits are ALREADY truncated to base_vocab_size (49 152) before being passed
 here — callers in distill_train.py are responsible for that slice.
 
 Loss registry:
-    "fkl"  — Forward KL   KL(teacher || student)      standard KD
-    "rkl"  — Reverse KL   KL(student || teacher)      mode-seeking
-    "js"   — Jensen-Shannon divergence                 symmetric
-    "tvd"  — Total Variation distance                  L1 in prob space
-    "taid" — Temperature-Annealing Interpolation KD   requires full logit vec
-    "dkd"  — Decoupled KD (TCKD + NCKD)              requires full logit vec + labels
+    "fkl"      — Forward KL   KL(teacher || student)      standard KD
+    "rkl"      — Reverse KL   KL(student || teacher)      mode-seeking
+    "js"       — Jensen-Shannon divergence                 asymmetric (teacher_weight param)
+    "tvd"      — Total Variation distance                  L1 in prob space
+    "taid"     — Temperature-Annealing Interpolation KD   requires full logit vec
+    "dkd"      — Decoupled KD (TCKD + NCKD)              requires full logit vec + labels
+    "skew_fkl" — Skewed Forward KL (DistiLLM)
+
+Implementations cross-checked against:
+    https://github.com/StevenLauHKHK/Beta-KD (fkl, rkl, tvd, js, taid, dkd)
+    https://github.com/jongwooko/distillm (fkl, rkl, tvd, js, skew_fkl)
 
 Weighting registry:
     "equal"           — uniform average of all loss terms
@@ -35,18 +40,28 @@ from typing import List, Optional
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Shared utility
+# Shared utilities
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _masked_mean(loss_per_token: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _masked_mean(per_token: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
-    Average loss over positions where mask == 1.
-    loss_per_token: [B, T]
-    mask:           [B, T]  (float or bool)
+    Weighted mean of per-token losses.
+    per_token: [B, T]
+    mask:      [B, T]  bool or float, 1 = answer token
     """
     mask = mask.float()
     denom = mask.sum() + 1e-8
-    return (loss_per_token * mask).sum() / denom
+    return (per_token * mask).sum() / denom
+
+
+def _masked_sum_div(x_flat: torch.Tensor, mask_flat: torch.Tensor) -> torch.Tensor:
+    """
+    Sum of (x * mask) / sum(mask).  Used by beta-kd style losses where the
+    product is already summed over the vocab dimension.
+    x_flat, mask_flat: [B*T]
+    """
+    denom = mask_flat.sum() + 1e-8
+    return (x_flat * mask_flat).sum() / denom
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -61,16 +76,29 @@ def forward_kl(
     **kwargs,
 ) -> torch.Tensor:
     """
-    Forward KL: KL(teacher || student)  — standard knowledge distillation.
-    Minimising this makes the student cover all modes the teacher assigns
-    probability to (mean-seeking behaviour).
+    Forward KL: KL(teacher || student) — standard knowledge distillation.
+
+    Implementation follows beta-kd / DistiLLM:
+      loss = -sum(q * log_p) / n_tokens
+    where q = softmax(teacher), p = softmax(student).
+    Inf positions in student logits are masked to 0.
+
+    Note: no T^2 rescaling here — temperature softens the distributions but
+    does not rescale the loss magnitude (unlike Hinton 2015).
     """
     T = temperature
-    log_p = F.log_softmax(student_logits / T, dim=-1)   # student log-probs
-    q     = F.softmax(teacher_logits    / T, dim=-1)    # teacher probs
-    # kl_div expects (log_input, target); reduction="none" -> [B, T, V]
-    per_token = F.kl_div(log_p, q, reduction="none").sum(-1)  # [B, T]
-    return _masked_mean(per_token, answer_mask) * (T ** 2)
+    # Cast to float32 for numerical stability (inputs may be bf16)
+    s = student_logits.float() / T
+    t = teacher_logits.float() / T
+
+    q          = F.softmax(t, dim=-1)                   # teacher probs
+    log_p      = F.log_softmax(s, dim=-1)               # student log-probs
+
+    inf_mask   = torch.isinf(s)                         # guard against ±inf
+    per_vocab  = torch.masked_fill(q * log_p, inf_mask, 0.0)
+    per_token  = -per_vocab.sum(-1)                     # [B, T]
+
+    return _masked_mean(per_token, answer_mask)
 
 
 def reverse_kl(
@@ -82,14 +110,21 @@ def reverse_kl(
 ) -> torch.Tensor:
     """
     Reverse KL: KL(student || teacher) — mode-seeking.
-    Student concentrates on one mode of the teacher; penalises hallucination.
+    loss = sum(p * (log_p - log_q)) / n_tokens
     """
     T = temperature
-    log_p = F.log_softmax(student_logits / T, dim=-1)
-    p     = F.softmax(student_logits    / T, dim=-1)
-    log_q = F.log_softmax(teacher_logits / T, dim=-1)
-    per_token = (p * (log_p - log_q)).sum(-1)           # [B, T]
-    return _masked_mean(per_token, answer_mask) * (T ** 2)
+    s = student_logits.float() / T
+    t = teacher_logits.float() / T
+
+    p         = F.softmax(s, dim=-1)
+    log_p     = F.log_softmax(s, dim=-1)
+    log_q     = F.log_softmax(t, dim=-1)
+
+    inf_mask  = torch.isinf(s) | torch.isinf(t)
+    per_vocab = torch.masked_fill(p * (log_p - log_q), inf_mask, 0.0)
+    per_token = per_vocab.sum(-1)                       # [B, T]
+
+    return _masked_mean(per_token, answer_mask)
 
 
 def js_divergence(
@@ -97,22 +132,45 @@ def js_divergence(
     teacher_logits: torch.Tensor,
     answer_mask: torch.Tensor,
     temperature: float = 1.0,
+    js_teacher_weight: float = 0.1,
     **kwargs,
 ) -> torch.Tensor:
     """
-    Jensen-Shannon divergence — symmetric, bounded in [0, log 2].
-    JS(p, q) = 0.5 * KL(p||m) + 0.5 * KL(q||m),  m = 0.5*(p+q)
+    (Asymmetric) Jensen-Shannon divergence, following beta-kd's JS class.
+
+    mixed = w * teacher + (1-w) * student   (default w=0.1, teacher-skewed)
+    JS = (1-w) * KL(student || mixed) + w * KL(teacher || mixed)
+
+    The asymmetry means this is closer to reverse-KL when w is small, which
+    is the beta-kd design choice (teacher_weight=0.1 by default).
+    Set js_teacher_weight=0.5 for the standard symmetric JS divergence.
     """
-    T = temperature
-    p = F.softmax(student_logits / T, dim=-1)
-    q = F.softmax(teacher_logits / T, dim=-1)
-    m = 0.5 * (p + q)
-    log_m = torch.log(m.clamp(min=1e-8))
-    per_token = 0.5 * (
-        F.kl_div(log_m, p, reduction="none").sum(-1) +
-        F.kl_div(log_m, q, reduction="none").sum(-1)
-    )   # [B, T]
-    return _masked_mean(per_token, answer_mask) * (T ** 2)
+    T  = temperature
+    w  = js_teacher_weight
+    s  = student_logits.float() / T
+    t  = teacher_logits.float() / T
+
+    p          = F.softmax(s, dim=-1)           # student probs
+    q          = F.softmax(t, dim=-1)           # teacher probs
+    mixed      = w * q + (1 - w) * p
+    log_mixed  = torch.log(mixed.clamp(min=1e-8))
+    log_p      = torch.log(p.clamp(min=1e-8))
+    log_q      = torch.log(q.clamp(min=1e-8))
+
+    inf_mask   = torch.isinf(s) | torch.isinf(t)
+
+    # (1-w) * KL(student || mixed) — reverse KL component
+    rkl_part = torch.masked_fill(p * (log_mixed - log_p), inf_mask, 0.0)
+    x_rkl    = rkl_part.sum(-1).view(-1)
+
+    # w * KL(teacher || mixed) — forward KL component
+    fkl_part = torch.masked_fill(q * (log_mixed - log_q), inf_mask, 0.0)
+    x_fkl    = fkl_part.sum(-1).view(-1)
+
+    mask_flat = answer_mask.float().view(-1)
+    loss = (1 - w) * _masked_sum_div(x_rkl, mask_flat) \
+         +      w  * _masked_sum_div(x_fkl, mask_flat)
+    return -loss   # negate because KL = -E[log(mixed/self)]
 
 
 def tv_distance(
@@ -127,9 +185,16 @@ def tv_distance(
     Bounded in [0, 1]; does not scale with temperature.
     """
     T = temperature
-    p = F.softmax(student_logits / T, dim=-1)
-    q = F.softmax(teacher_logits / T, dim=-1)
-    per_token = 0.5 * (p - q).abs().sum(-1)    # [B, T]
+    s = student_logits.float() / T
+    t = teacher_logits.float() / T
+
+    p         = F.softmax(s, dim=-1)
+    q         = F.softmax(t, dim=-1)
+    inf_mask  = torch.isinf(s) | torch.isinf(t)
+
+    per_vocab = torch.masked_fill(0.5 * (p - q).abs(), inf_mask, 0.0)
+    per_token = per_vocab.sum(-1)                       # [B, T]
+
     return _masked_mean(per_token, answer_mask)
 
 
@@ -145,15 +210,19 @@ def taid_loss(
     **kwargs,
 ) -> torch.Tensor:
     """
-    Temperature-Annealing Interpolation Distillation (TAID).
+    Temperature-Annealing Interpolation Distillation (TAID), simplified
+    (linear schedule).
 
-    Interpolated target: p_t = (1-α)*student_logits + α*teacher_logits
-    where α ramps linearly from taid_alpha_start to taid_alpha_end.
+    Interpolated target: p_t = softmax( (1-α)*student.detach() + α*teacher )
+    KD loss:             FKL( student || p_t )
 
-    Requires FULL logit vectors — top-K storage breaks this because the
-    interpolation is done in raw logit space before softmax.
+    The DETACH on student logits is critical — without it, gradients would flow
+    through p_t back into the student a second time, corrupting the update.
 
-    Reference: arXiv:XXXX (Beta-KD paper)
+    Full beta-kd TAID uses an adaptive momentum-based schedule for α; here we
+    use a simple linear ramp from taid_alpha_start to taid_alpha_end.
+
+    Requires FULL logit vectors — top-K storage breaks the interpolation.
     """
     alpha = taid_alpha_start + (taid_alpha_end - taid_alpha_start) * (
         global_step / max(total_steps, 1)
@@ -161,11 +230,53 @@ def taid_loss(
     alpha = float(max(0.0, min(1.0, alpha)))
 
     T = temperature
-    interpolated = (1.0 - alpha) * student_logits + alpha * teacher_logits
-    log_p      = F.log_softmax(student_logits / T, dim=-1)
-    q_interp   = F.softmax(interpolated       / T, dim=-1)
-    per_token  = F.kl_div(log_p, q_interp, reduction="none").sum(-1)  # [B, T]
-    return _masked_mean(per_token, answer_mask) * (T ** 2)
+    s = student_logits.float() / T
+    t = teacher_logits.float() / T
+
+    # Interpolate in logit space; detach student so only one gradient path exists
+    interpolated = (1.0 - alpha) * s.detach() + alpha * t
+    p_t    = F.softmax(interpolated, dim=-1)        # interpolated target probs
+
+    log_p  = F.log_softmax(s, dim=-1)               # student log-probs (grad flows here)
+    inf_mask = torch.isinf(s)
+    per_vocab = torch.masked_fill(p_t * log_p, inf_mask, 0.0)
+    per_token = -per_vocab.sum(-1)                  # [B, T]
+
+    return _masked_mean(per_token, answer_mask)
+
+
+def skew_fkl(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    answer_mask: torch.Tensor,
+    temperature: float = 1.0,
+    skew_target_weight: float = 0.1,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Skewed Forward KL (DistiLLM, https://arxiv.org/abs/2402.03898).
+
+    mixed = w * teacher + (1-w) * student
+    loss  = FKL(teacher || mixed) = -sum(q * log(mixed)) / n_tokens
+
+    Useful when you want the teacher distribution to guide without fully
+    overriding the student's learned modes.
+    """
+    T = temperature
+    w = skew_target_weight
+    s = student_logits.float() / T
+    t = teacher_logits.float() / T
+
+    p     = F.softmax(s, dim=-1)
+    q     = F.softmax(t, dim=-1)
+    mixed = w * q + (1 - w) * p
+    log_m = torch.log(mixed.clamp(min=1e-8))
+
+    inf_mask  = torch.isinf(s) | torch.isinf(t)
+    per_vocab = torch.masked_fill(q * log_m, inf_mask, 0.0)
+    per_token = -per_vocab.sum(-1)                  # [B, T]
+
+    return _masked_mean(per_token, answer_mask)
 
 
 def dkd_loss(
@@ -186,8 +297,9 @@ def dkd_loss(
 
     dkd_alpha weights TCKD, dkd_beta weights NCKD.
 
-    Requires FULL logit vectors (GT token index must exist in the vocab) and
-    the ground-truth token IDs (labels) for the answer positions.
+    IMPORTANT: `labels` must be [B, T] matching the shape of student_logits.
+    Callers must extract answer-position labels before calling this
+    (distill_train.py does this via gather_answer_labels).
 
     Reference: https://arxiv.org/abs/2203.08679
     """
@@ -196,17 +308,24 @@ def dkd_loss(
 
     T = temperature
     B, L, V = student_logits.shape
-    mask_flat = answer_mask.float().reshape(-1)     # [B*L]
 
-    s_flat = student_logits.reshape(-1, V)          # [B*L, V]
-    t_flat = teacher_logits.reshape(-1, V)          # [B*L, V]
+    # Verify shape compatibility
+    if labels.shape != (B, L):
+        raise ValueError(
+            f"dkd_loss: labels shape {labels.shape} must match "
+            f"student_logits [B, T] = [{B}, {L}]. "
+            "Pass answer-position labels via gather_answer_labels()."
+        )
 
-    # Ground-truth token IDs; labels has -100 for non-answer → clamp to 0
+    mask_flat = answer_mask.float().reshape(-1)         # [B*L]
+    s_flat    = student_logits.float().reshape(-1, V)   # [B*L, V]
+    t_flat    = teacher_logits.float().reshape(-1, V)   # [B*L, V]
+
+    # GT token IDs; -100 (ignore index) → clamp to 0 (masked out by mask_flat)
     targets = labels.reshape(-1).clone()
     targets[targets < 0] = 0
     targets = targets.clamp(0, V - 1)
 
-    # Boolean masks: which vocab slot is the ground-truth token?
     gt_mask    = torch.zeros_like(s_flat, dtype=torch.bool).scatter_(
         1, targets.unsqueeze(1), True
     )
@@ -217,22 +336,22 @@ def dkd_loss(
 
     def _collapse(dist: torch.Tensor) -> torch.Tensor:
         """Collapse to 2-class: [p_gt, p_rest]."""
-        p_gt   = (dist * gt_mask).sum(1, keepdim=True)
+        p_gt   = (dist * gt_mask  ).sum(1, keepdim=True)
         p_rest = (dist * other_mask).sum(1, keepdim=True)
         return torch.cat([p_gt, p_rest], dim=1).clamp(min=1e-8)  # [B*L, 2]
 
-    # TCKD: KL on the collapsed 2-class distribution
-    p_s2 = _collapse(p_s)
-    p_t2 = _collapse(p_t)
+    # TCKD
+    p_s2     = _collapse(p_s)
+    p_t2     = _collapse(p_t)
     tckd_per = F.kl_div(p_s2.log(), p_t2, reduction="none").sum(-1)  # [B*L]
-    tckd = (tckd_per * mask_flat).sum() / (mask_flat.sum() + 1e-8) * T ** 2
+    tckd     = (tckd_per * mask_flat).sum() / (mask_flat.sum() + 1e-8)
 
-    # NCKD: KL on the non-target class distribution (mask out GT token)
-    INF = 1e4
-    log_p_s_ngt = F.log_softmax(s_flat / T - INF * gt_mask, dim=-1)
-    p_t_ngt     = F.softmax(    t_flat / T - INF * gt_mask, dim=-1)
-    nckd_per    = F.kl_div(log_p_s_ngt, p_t_ngt, reduction="none").sum(-1)  # [B*L]
-    nckd = (nckd_per * mask_flat).sum() / (mask_flat.sum() + 1e-8) * T ** 2
+    # NCKD — mask out GT token with large negative value
+    INF          = 1e4
+    log_p_s_ngt  = F.log_softmax(s_flat / T - INF * gt_mask, dim=-1)
+    p_t_ngt      = F.softmax(    t_flat / T - INF * gt_mask, dim=-1)
+    nckd_per     = F.kl_div(log_p_s_ngt, p_t_ngt, reduction="none").sum(-1)
+    nckd         = (nckd_per * mask_flat).sum() / (mask_flat.sum() + 1e-8)
 
     return dkd_alpha * tckd + dkd_beta * nckd
 
@@ -242,12 +361,13 @@ def dkd_loss(
 # ──────────────────────────────────────────────────────────────────────────────
 
 LOSS_REGISTRY: dict = {
-    "fkl":  forward_kl,
-    "rkl":  reverse_kl,
-    "js":   js_divergence,
-    "tvd":  tv_distance,
-    "taid": taid_loss,
-    "dkd":  dkd_loss,
+    "fkl":      forward_kl,
+    "rkl":      reverse_kl,
+    "js":       js_divergence,
+    "tvd":      tv_distance,
+    "taid":     taid_loss,
+    "dkd":      dkd_loss,
+    "skew_fkl": skew_fkl,
 }
 
 
@@ -283,8 +403,8 @@ class HeteroscedasticWeighting(nn.Module):
 
     L_total = Σ_i  [ 0.5 * exp(-log_σ_i) * L_i  +  0.5 * log_σ_i ]
 
-    log_σ_i is initialised to 0 (σ = 1, equal weights) and learned during
-    training.  It is automatically added to the optimizer by distill_train.py.
+    log_σ_i is initialised to 0 (σ=1, equal weights) and learned during
+    training. Added to the optimizer by distill_train.py.
 
     Reference: https://arxiv.org/abs/1705.07115
     """

@@ -113,10 +113,6 @@ class SmolVLM2Teacher(BaseTeacher):
         for p in self.model.parameters():
             p.requires_grad_(False)
 
-        # Cache the token IDs for the assistant turn boundary so we don't
-        # re-encode them on every forward pass.
-        self._assistant_header_ids: Optional[List[int]] = None
-
     # ── Public API ────────────────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -133,6 +129,8 @@ class SmolVLM2Teacher(BaseTeacher):
         raw_conversations = batch["raw_conversations"] # List[List[dict]]
 
         all_logits: List[torch.Tensor] = []
+
+        teacher_device = next(self.model.parameters()).device
 
         for imgs, conv, answer_text in zip(raw_images, raw_conversations, raw_answers):
             # Build the teacher conversation in SmolVLM2's multimodal format.
@@ -158,34 +156,44 @@ class SmolVLM2Teacher(BaseTeacher):
                 content.append({"type": "text", "text": ""})
                 teacher_conv.append({"role": "user", "content": content})
 
-            # Append ground-truth answer as the assistant turn
-            teacher_conv.append({"role": "assistant", "content": answer_text})
-
-            text = self.processor.apply_chat_template(
-                teacher_conv,
+            # ── Find answer start by tokenising the prompt-only prefix ────────
+            # This is more robust than searching for a header token pattern,
+            # because special tokens may be merged or encoded differently across
+            # processor versions.  add_generation_prompt=True appends the
+            # assistant header so T_prompt already includes it.
+            prompt_text = self.processor.apply_chat_template(
+                teacher_conv,                    # prompt only, no answer yet
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=True,      # adds "<|im_start|>assistant\n"
             )
-
-            inputs = self.processor(
-                text=text,
+            prompt_inputs = self.processor(
+                text=prompt_text,
                 images=imgs if imgs else None,
                 return_tensors="pt",
             )
-            # Move inputs to whichever device the teacher's first parameter lives on
-            teacher_device = next(self.model.parameters()).device
+            answer_start = prompt_inputs["input_ids"].shape[1]  # exact boundary
+
+            # ── Full conversation (prompt + answer) for the teacher forward ───
+            teacher_conv_full = teacher_conv + [{"role": "assistant", "content": answer_text}]
+            full_text = self.processor.apply_chat_template(
+                teacher_conv_full,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            inputs = self.processor(
+                text=full_text,
+                images=imgs if imgs else None,
+                return_tensors="pt",
+            )
             inputs = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
                       for k, v in inputs.items()}
 
             outputs = self.model(**inputs)
-            logits = outputs.logits  # [1, T_teacher, V_teacher]
+            logits = outputs.logits  # [1, T_full, V_teacher]
 
-            # Find where the assistant answer starts in the teacher's sequence
-            answer_start = self._find_answer_start(inputs["input_ids"][0])
-
-            # Slice to answer positions; shift by -1 for causal LM convention
-            # (position i predicts token i+1, so logits[answer_start-1:-1] predicts
-            #  the answer tokens).
+            # Causal LM convention: logits[t] predicts token[t+1].
+            # Answer tokens are at positions [answer_start : T_full].
+            # The logits that predict them are at [answer_start-1 : T_full-1].
             answer_logits = logits[0, answer_start - 1 : -1, :self.base_vocab_size]
             # Shape: [T_answer_i, base_vocab_size]
 
@@ -202,42 +210,6 @@ class SmolVLM2Teacher(BaseTeacher):
 
         return out.to(self.student_device)
 
-    # ── Private helpers ───────────────────────────────────────────────────────
-
-    def _get_assistant_header_ids(self) -> List[int]:
-        """Cache-and-return the token IDs for '<|im_start|>assistant'."""
-        if self._assistant_header_ids is None:
-            self._assistant_header_ids = self.processor.tokenizer.encode(
-                "<|im_start|>assistant",
-                add_special_tokens=False,
-            )
-        return self._assistant_header_ids
-
-    def _find_answer_start(self, input_ids: torch.Tensor) -> int:
-        """
-        Return the index (inclusive) of the first answer token in the teacher
-        sequence.  We scan backwards for the last occurrence of the assistant
-        header so multi-turn conversations are handled correctly.
-
-        The SmolVLM2 chat template uses:
-            <|im_start|>assistant\n<answer tokens><|im_end|>
-        so the answer starts at  header_end + 1  (the '\n' token).
-        """
-        header = self._get_assistant_header_ids()
-        ids = input_ids.tolist()
-        h_len = len(header)
-
-        for pos in range(len(ids) - h_len, -1, -1):
-            if ids[pos : pos + h_len] == header:
-                # +h_len to skip the header itself, +1 for the '\n' newline token
-                return pos + h_len + 1
-
-        # Fallback: treat the very last token as the answer
-        logger.warning(
-            "Could not find assistant header in teacher input_ids. "
-            "Falling back to last token position."
-        )
-        return len(ids) - 1
 
 
 # ──────────────────────────────────────────────────────────────────────────────

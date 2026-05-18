@@ -115,6 +115,10 @@ class DistillConfig:
     dkd_alpha: float = 1.0              # TCKD weight
     dkd_beta: float = 5.0               # NCKD weight
 
+    # ── JS / skew_fkl-specific ─────────────────────────────────────────────────
+    js_teacher_weight: float = 0.1      # w in: mixed = w*teacher + (1-w)*student
+    skew_target_weight: float = 0.1     # same role for skew_fkl
+
     # ── Loss weighting strategy ───────────────────────────────────────────────
     # equal | heteroscedastic
     weighting_strategy: str = "equal"
