@@ -780,7 +780,7 @@ def main():
 
     # ── Distillation args ─────────────────────────────────────────────────────
     parser.add_argument("--teacher_model_id",       type=str,
-                        default="HuggingFaceTB/SmolVLM2-1.7B-Instruct",
+                        default="HuggingFaceTB/SmolVLM2-2.2B-Instruct",
                         help="HF model ID for the teacher (must share base vocab with student)")
     parser.add_argument("--distill_loss",           type=str, default="fkl",
                         help="KD loss: fkl | rkl | js | tvd | taid | dkd")

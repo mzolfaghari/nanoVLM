@@ -79,7 +79,7 @@ srun torchrun \
     --no_log_wandb \
     --train_dataset_path /home/khashmi/data/qvac-vlm/finevision_doc_filter/presampled_dataset/fvdoc_v1_45-30-20-5_2026-05-12_imgcast \
     --train_dataset_name default \
-    --teacher_model_id HuggingFaceTB/SmolVLM2-1.7B-Instruct \
+    --teacher_model_id HuggingFaceTB/SmolVLM2-2.2B-Instruct \
     --distill_loss fkl \
     --distill_weight 1.0 \
     --ce_weight 1.0 \

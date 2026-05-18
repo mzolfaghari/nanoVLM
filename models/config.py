@@ -91,7 +91,7 @@ class TrainConfig:
 @dataclass
 class DistillConfig:
     # ── Teacher ──────────────────────────────────────────────────────────────
-    teacher_model_id: str = "HuggingFaceTB/SmolVLM2-1.7B-Instruct"
+    teacher_model_id: str = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     teacher_dtype: str = "bfloat16"     # bf16 saves VRAM; logits cast to fp32 before KD loss
 
     # ── Vocab alignment ───────────────────────────────────────────────────────
