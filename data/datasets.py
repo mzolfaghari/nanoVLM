@@ -138,6 +138,13 @@ class VQADataset(BaseDataset):  # Visual Question Answering Dataset
             if not isinstance(images_data, list):
                 images_data = [images_data]
 
+        # Keep raw PIL images before student preprocessing (needed by teacher).
+        # We convert to RGB here so the teacher processor doesn't have to.
+        raw_pil_images = []
+        for img in images_data:
+            if isinstance(img, Image.Image):
+                raw_pil_images.append(img.convert("RGB") if img.mode != "RGB" else img)
+
         processed_images = []
         splitted_image_counts = []
         if images_data: # Only process if there are images
@@ -154,11 +161,38 @@ class VQADataset(BaseDataset):  # Visual Question Answering Dataset
         input_ids, mask, attention_mask = packed
         labels = self._get_labels(input_ids, mask)
 
+        # answer_mask: True at positions the student is trained to predict.
+        # Matches labels != -100 (after the roll-by-1 shift in _get_labels).
+        answer_mask = (labels != -100)
+
+        # Build raw conversation fields for the teacher.
+        # raw_conversations: the prompt turns (all but the last assistant turn).
+        # raw_answer:        the final assistant response text.
+        texts = item.get("texts", [])
+        if texts:
+            last_text = texts[-1]
+            raw_answer = last_text.get("assistant", "")
+            # Build prompt messages (user turns only up to the last one)
+            raw_conversation = []
+            for t in texts[:-1]:
+                raw_conversation.append({"role": "user",      "content": t.get("user", "")})
+                raw_conversation.append({"role": "assistant", "content": t.get("assistant", "")})
+            # Add the final user turn (without the answer)
+            raw_conversation.append({"role": "user", "content": last_text.get("user", "")})
+        else:
+            raw_answer = ""
+            raw_conversation = []
+
         return {
-            "images": processed_images,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
+            "images":            processed_images,
+            "input_ids":         input_ids,
+            "attention_mask":    attention_mask,
+            "labels":            labels,
+            # ── Distillation fields ──────────────────────────────────────────
+            "answer_mask":       answer_mask,       # bool [T_seq]
+            "raw_images":        raw_pil_images,    # List[PIL.Image]
+            "raw_answer":        raw_answer,        # str
+            "raw_conversation":  raw_conversation,  # List[dict]
         }
 
     def _get_labels(self, input_ids, mask):

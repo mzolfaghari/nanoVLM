@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 
 @dataclass
@@ -85,3 +86,50 @@ class TrainConfig:
     lmms_eval_tasks: str = 'mmstar,mmmu_val,ocrbench,textvqa_val,docvqa_val,scienceqa,mme,infovqa_val,chartqa' # Pass additional task as one string, seperated by commas without spaces (e.g. 'mmstar,mmmu,ocrbench')
     lmms_eval_limit: float = None
     lmms_eval_batch_size: int = 64
+
+
+@dataclass
+class DistillConfig:
+    # ── Teacher ──────────────────────────────────────────────────────────────
+    teacher_model_id: str = "HuggingFaceTB/SmolVLM2-1.7B-Instruct"
+    teacher_dtype: str = "bfloat16"     # bf16 saves VRAM; logits cast to fp32 before KD loss
+
+    # ── Vocab alignment ───────────────────────────────────────────────────────
+    # Both student (SmolLM2-360M) and SmolVLM2 share the same 49152-token base
+    # vocabulary. Student adds 66 extra tokens (49152-49217) for image formatting.
+    # Truncating both logit tensors to base_vocab_size makes KD well-defined.
+    base_vocab_size: int = 49152
+
+    # ── Loss composition ──────────────────────────────────────────────────────
+    # distill_loss: one of fkl | rkl | taid | dkd | js | tvd
+    distill_loss: str = "fkl"
+    distill_weight: float = 1.0         # λ for KD loss
+    ce_weight: float = 1.0              # λ for cross-entropy; set 0 for pure KD
+    temperature: float = 2.0            # softmax temperature for KD (>1 softens dists)
+
+    # ── TAID-specific ─────────────────────────────────────────────────────────
+    taid_alpha_start: float = 0.0       # start fully anchored to student
+    taid_alpha_end: float = 1.0         # end fully anchored to teacher
+
+    # ── DKD-specific ──────────────────────────────────────────────────────────
+    dkd_alpha: float = 1.0              # TCKD weight
+    dkd_beta: float = 5.0               # NCKD weight
+
+    # ── Loss weighting strategy ───────────────────────────────────────────────
+    # equal | heteroscedastic
+    weighting_strategy: str = "equal"
+
+    # ── Data pipeline ─────────────────────────────────────────────────────────
+    # Packing (ConstantLengthDataset) must be disabled: teacher needs one sample
+    # at a time to align its sequence positions with the student's answer span.
+    max_sample_length: int = 2048
+
+    # ── Multi-teacher (future) ────────────────────────────────────────────────
+    # Comma-separated model IDs for EnsembleTeacher, e.g.:
+    # "HuggingFaceTB/SmolVLM2-1.7B-Instruct,HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    ensemble_teacher_ids: Optional[str] = None
+    # Comma-separated weights (must sum to 1), e.g. "0.6,0.4"
+    ensemble_teacher_weights: Optional[str] = None
+
+    # ── Checkpoint ────────────────────────────────────────────────────────────
+    distill_checkpoint_path: str = "checkpoints_distill"

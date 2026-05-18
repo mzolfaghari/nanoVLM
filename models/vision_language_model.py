@@ -69,12 +69,11 @@ class VisionLanguageModel(nn.Module):
             token_embd = self._replace_img_tokens_with_embd(input_ids, token_embd, image_embd)
 
         logits, _ = self.decoder(token_embd, attention_mask=attention_mask)
+        logits = self.decoder.head(logits)  # Always project to vocab space (needed for distillation)
 
         loss = None
         if targets is not None:
-            logits = self.decoder.head(logits) # Apply LM head
             # Loss is calculated over all tokens, but `targets` (labels) will have -100 for non-answer tokens.
-            # No need to slice logits based on image embedding size here, as the target mask handles it.
             loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1), ignore_index=-100)
 
         return logits, loss
