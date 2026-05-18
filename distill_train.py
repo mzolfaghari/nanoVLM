@@ -497,8 +497,12 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
             fw_bw_start = time.time()
 
             # ── Forward pass ──────────────────────────────────────────────────
-            with autocast_context:
-                with no_sync_ctx:
+            # model.no_sync() returns a _GeneratorContextManager that cannot be
+            # entered twice (Python 3.11 deletes args/kwds/func on __enter__).
+            # Use a single no_sync_ctx block for both student forward and KD loss,
+            # with the teacher forward nested inside torch.no_grad().
+            with no_sync_ctx:
+                with autocast_context:
                     # Student: always returns full vocab logits now
                     student_logits, ce_loss = model(
                         input_ids, images,
@@ -507,17 +511,15 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                     )
                     # student_logits: [B, T_seq, V_student=49218]
 
-                    # ── Teacher forward (outside autocast, always fp32) ────────
-                    # We exit autocast for the teacher so it stays in its native
-                    # bf16 precision (set at load time) and logits are cast to
-                    # fp32 inside get_answer_logits().
-            with torch.no_grad():
-                # teacher returns [B, T_answer, base_vocab_size] fp32 on `device`
-                teacher_logits = teacher.get_answer_logits(batch)
+                # ── Teacher forward (outside autocast, always fp32) ────────
+                # We exit autocast so the teacher stays in its native bf16
+                # precision; logits are cast to fp32 inside get_answer_logits().
+                with torch.no_grad():
+                    # teacher returns [B, T_answer, base_vocab_size] fp32 on `device`
+                    teacher_logits = teacher.get_answer_logits(batch)
 
-            # ── Back to autocast for the KD loss computation ───────────────────
-            with autocast_context:
-                with no_sync_ctx:
+                # ── KD loss computation ────────────────────────────────────────
+                with autocast_context:
                     T_answer = teacher_logits.size(1)
 
                     # Truncate student logits to base vocab (removes image tokens)
