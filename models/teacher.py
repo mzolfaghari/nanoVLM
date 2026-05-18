@@ -113,6 +113,28 @@ class SmolVLM2Teacher(BaseTeacher):
         for p in self.model.parameters():
             p.requires_grad_(False)
 
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """
+        Strip raw image-placeholder tokens that some datasets embed in the
+        user message text (e.g. LLaVA-format datasets use the literal string
+        "<image>" to mark where the image appears).
+
+        SmolVLM2's processor counts every occurrence of "<image>" in the
+        rendered text against the number of PIL images passed.  If the raw
+        dataset text already contains "<image>" and we also inject
+        {"type":"image"} content blocks, the token count exceeds the PIL
+        count and raises a validation error.  Stripping the placeholders
+        here keeps the invariant:
+            count("<image>" in template output) == len(pil_image_list)
+        """
+        # "<image>" is SmolVLM2's image token; "<|image|>" is nanoVLM's.
+        # Both must be removed so the teacher never sees stale placeholders.
+        text = text.replace("<image>", "").replace("<|image|>", "")
+        return text.strip()
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -142,13 +164,25 @@ class SmolVLM2Teacher(BaseTeacher):
             images_injected = False
             for msg in conv:
                 if msg["role"] == "user" and not images_injected and imgs:
-                    # First user turn: prepend one {"type":"image"} per PIL image
+                    # First user turn: inject one {"type":"image"} block per PIL.
+                    # The processor handles tiling internally — we must NOT add
+                    # extra blocks for tiles.  The text content is cleaned of any
+                    # raw "<image>" / "<|image|>" placeholders the dataset may have
+                    # embedded (LLaVA-format datasets often include them).  Leaving
+                    # those placeholders in would make SmolVLM2's processor count
+                    # more image tokens in the text than PIL images supplied,
+                    # raising: "number of images in text [N] and images [M] differ".
                     content: list = [{"type": "image"} for _ in imgs]
-                    content.append({"type": "text", "text": msg["content"]})
+                    content.append({"type": "text", "text": self._clean_text(msg["content"])})
                     teacher_conv.append({"role": "user", "content": content})
                     images_injected = True
                 else:
-                    teacher_conv.append(msg)
+                    # Non-image turns: still clean text to be safe, keep as list
+                    # format so SmolVLM2's template handles them correctly.
+                    teacher_conv.append({
+                        "role": msg["role"],
+                        "content": [{"type": "text", "text": self._clean_text(msg["content"])}],
+                    })
 
             # If there were no user turns (shouldn't happen), just add a bare user msg
             if not teacher_conv and imgs:
