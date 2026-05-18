@@ -447,6 +447,8 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
         "images_per_sample": [],
         "kd_loss": [],
         "ce_loss": [],
+        "teacher_entropy": [],   # should be < log(49152)=10.78; lower = more peaked signal
+        "top1_agreement": [],    # student-teacher top-1 match rate; should rise over training
     }
 
     autocast_context = torch.autocast(
@@ -616,6 +618,20 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                         flush=True,
                     )
 
+            # ── Distillation signal quality metrics (no extra compute) ─────
+            with torch.no_grad():
+                # Teacher entropy: should be well below log(V)=10.78 (meaningful signal)
+                t_probs   = torch.softmax(teacher_logits.float(), dim=-1)
+                t_entropy = -(t_probs * torch.log(t_probs.clamp(1e-10))).sum(-1)
+                t_entropy = (t_entropy * t_ans_mask).sum() / (t_ans_mask.sum() + 1e-8)
+
+                # Top-1 agreement: fraction of answer positions where student and
+                # teacher agree on the most likely next token.  Should increase
+                # over training (starts near 0, good model > 30%).
+                s_top1 = s_ans.float().argmax(-1)           # [B, T_ans]
+                t_top1 = teacher_logits.float().argmax(-1)  # [B, T_ans]
+                agree  = ((s_top1 == t_top1).float() * t_ans_mask).sum() / (t_ans_mask.sum() + 1e-8)
+
             # Accumulate stats
             accumulated_stats["tokens_per_second"].append(tokens_per_second)
             accumulated_stats["data_load_time"].append(data_load_time)
@@ -623,6 +639,8 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
             accumulated_stats["post_process_time"].append(post_process_time)
             accumulated_stats["images_per_sample"].extend(images_per_sample)
             accumulated_stats["kd_loss"].append(kd_loss.item())
+            accumulated_stats["teacher_entropy"].append(t_entropy.item())
+            accumulated_stats["top1_agreement"].append(agree.item())
             if ce_loss is not None:
                 accumulated_stats["ce_loss"].append(ce_loss.item())
 
@@ -723,16 +741,23 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                         all_v = vals
                     stats[f"avg_{key}"] = mean(all_v) if all_v else 0
 
-                avg_kd = mean(accumulated_stats["kd_loss"]) if accumulated_stats["kd_loss"] else 0
-                avg_ce = mean(accumulated_stats["ce_loss"]) if accumulated_stats["ce_loss"] else 0
+                avg_kd      = mean(accumulated_stats["kd_loss"])      if accumulated_stats["kd_loss"]      else 0
+                avg_ce      = mean(accumulated_stats["ce_loss"])      if accumulated_stats["ce_loss"]      else 0
+                avg_entropy = mean(accumulated_stats["teacher_entropy"]) if accumulated_stats["teacher_entropy"] else 0
+                avg_agree   = mean(accumulated_stats["top1_agreement"])  if accumulated_stats["top1_agreement"]  else 0
 
                 if is_master():
-                    print(f"[stats] step={global_step} avg_kd={avg_kd:.4f} avg_ce={avg_ce:.4f} "
+                    print(f"[stats] step={global_step} "
+                          f"avg_kd={avg_kd:.4f} avg_ce={avg_ce:.4f} "
+                          f"teacher_entropy={avg_entropy:.3f}/10.78 "
+                          f"top1_agree={avg_agree:.1%} "
                           f"tok/s={stats['avg_tokens_per_second']:.0f}")
                     if train_cfg.log_wandb:
                         run.log({
-                            "train/kd_loss":  avg_kd,
-                            "train/ce_loss":  avg_ce,
+                            "train/kd_loss":         avg_kd,
+                            "train/ce_loss":         avg_ce,
+                            "train/teacher_entropy": avg_entropy,
+                            "train/top1_agreement":  avg_agree,
                             **{f"training_stats/{k}": v for k, v in stats.items()},
                         }, step=global_step)
 
