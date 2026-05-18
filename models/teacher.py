@@ -166,60 +166,113 @@ class SmolVLM2Teacher(BaseTeacher):
                 content.append({"type": "text", "text": ""})
                 teacher_conv.append({"role": "user", "content": content})
 
-            # ── Find answer start by tokenising the prompt-only prefix ────────
-            # This is more robust than searching for a header token pattern,
-            # because special tokens may be merged or encoded differently across
-            # processor versions.  add_generation_prompt=True appends the
-            # assistant header so T_prompt already includes it.
+            # ── Step 1: tokenise the prompt with images ───────────────────────
+            # apply_chat_template produces text with image-token placeholders;
+            # processor() expands each placeholder into the correct number of
+            # image token IDs (which are determined by the image resolution and
+            # the processor's patch/tile settings).
             prompt_text = self.processor.apply_chat_template(
-                teacher_conv,                    # prompt only, no answer yet
+                teacher_conv,
                 tokenize=False,
-                add_generation_prompt=True,      # adds "<|im_start|>assistant\n"
+                add_generation_prompt=True,      # appends "<|im_start|>assistant\n"
             )
             prompt_inputs = self.processor(
                 text=prompt_text,
                 images=imgs if imgs else None,
                 return_tensors="pt",
-                truncation=False,   # SmolVLM2 image tokens are long; never truncate
+                truncation=False,
             )
-            answer_start = prompt_inputs["input_ids"].shape[1]  # exact boundary
+            answer_start = prompt_inputs["input_ids"].shape[1]  # T_prompt
 
-            # ── Full conversation (prompt + answer) for the teacher forward ───
-            teacher_conv_full = teacher_conv + [{"role": "assistant", "content": answer_text}]
-            full_text = self.processor.apply_chat_template(
-                teacher_conv_full,
+            # ── Step 2: extract answer token IDs without touching the processor ─
+            # Root cause of the T_ans=3 bug: passing the full conversation text
+            # (prompt + answer) back through processor() caused the answer to be
+            # silently dropped (the processor returned exactly T_prompt+3 tokens
+            # regardless of answer length, possibly because apply_chat_template
+            # with add_generation_prompt=False strips the last assistant turn, or
+            # because the processor has its own internal length cap that our
+            # model_max_length override cannot reach).
+            #
+            # Fix: derive the answer-portion text by diffing the full-conversation
+            # template output against the prompt-only template output (both at the
+            # character level), then tokenise that substring directly with the
+            # bare tokenizer — no images, no processor expansion.  This gives the
+            # correct token IDs for the answer (including the closing <|im_end|>\n
+            # that the student is also trained to predict).
+            full_conv_text = self.processor.apply_chat_template(
+                teacher_conv + [{"role": "assistant", "content": answer_text}],
                 tokenize=False,
                 add_generation_prompt=False,
             )
-            inputs = self.processor(
-                text=full_text,
-                images=imgs if imgs else None,
-                return_tensors="pt",
-                truncation=False,   # must match prompt tokenisation to get correct answer_start
-            )
-            inputs = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
-                      for k, v in inputs.items()}
+            # full_conv_text  = "...image_placeholders...question...<|im_end|>\n
+            #                    <|im_start|>assistant\n{answer}<|im_end|>\n"
+            # prompt_text     = "...image_placeholders...question...<|im_end|>\n
+            #                    <|im_start|>assistant\n"
+            # answer_portion  =                                       "{answer}<|im_end|>\n"
+            answer_portion = full_conv_text[len(prompt_text):]
 
-            outputs = self.model(**inputs)
-            logits = outputs.logits  # [1, T_full, V_teacher]
-
-            # Causal LM convention: logits[t] predicts token[t+1].
-            # Answer tokens are at positions [answer_start : T_full].
-            # The logits that predict them are at [answer_start-1 : T_full-1].
-            answer_logits = logits[0, answer_start - 1 : -1, :self.base_vocab_size]
-            # Shape: [T_answer_i, base_vocab_size]
-
-            # Sanity: warn if the answer slice is much shorter than expected.
-            # Typical cause: tokenizer truncated the full sequence despite
-            # truncation=False.  This means image tokens filled most of the
-            # context window and the answer was cut off.
-            T_ans_i = answer_logits.size(0)
-            T_full_i = logits.size(1)
-            if T_ans_i < 4 and (T_full_i - answer_start) < 4:
+            if not answer_portion.strip():
                 logger.warning(
-                    "Very short answer logits (T_ans=%d, T_full=%d, answer_start=%d). "
-                    "Possible truncation — check model_max_length vs image token count.",
-                    T_ans_i, T_full_i, answer_start,
+                    "Empty answer portion after template diff — skipping sample. "
+                    "full_conv_text len=%d, prompt_text len=%d",
+                    len(full_conv_text), len(prompt_text),
+                )
+                all_logits.append(torch.zeros(1, self.base_vocab_size))
+                continue
+
+            answer_ids = self.processor.tokenizer(
+                answer_portion,
+                return_tensors="pt",
+                add_special_tokens=False,
+            )["input_ids"]          # [1, T_ans]
+
+            # ── Step 3: concatenate prompt + answer tokens, single forward pass ─
+            full_input_ids = torch.cat([
+                prompt_inputs["input_ids"].to(teacher_device),
+                answer_ids.to(teacher_device),
+            ], dim=1)
+
+            prompt_attn = prompt_inputs.get(
+                "attention_mask",
+                torch.ones_like(prompt_inputs["input_ids"]),
+            )
+            full_attn = torch.cat([
+                prompt_attn.to(teacher_device),
+                torch.ones(1, answer_ids.size(1), dtype=torch.long,
+                           device=teacher_device),
+            ], dim=1)
+
+            # Remaining prompt_inputs keys (pixel_values, image_attention_mask,
+            # etc.) are passed as-is — the model uses them together with input_ids
+            # to embed image patches into the sequence.
+            extra = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
+                     for k, v in prompt_inputs.items()
+                     if k not in ("input_ids", "attention_mask")}
+
+            outputs = self.model(
+                input_ids=full_input_ids,
+                attention_mask=full_attn,
+                **extra,
+            )
+            logits = outputs.logits          # [1, T_prompt+T_ans, V_teacher]
+
+            # ── Step 4: extract answer logits ─────────────────────────────────
+            # logits[t] predicts token[t+1].  Answer tokens occupy positions
+            # [answer_start .. answer_start+T_ans-1], so the predicting logits
+            # are at [answer_start-1 .. answer_start+T_ans-2].
+            T_ans_i = answer_ids.size(1)
+            answer_logits = logits[
+                0,
+                answer_start - 1 : answer_start - 1 + T_ans_i,
+                :self.base_vocab_size,
+            ]                                # [T_ans_i, base_vocab_size]
+
+            if answer_logits.size(0) != T_ans_i:
+                logger.warning(
+                    "answer_logits shape mismatch: expected %d, got %d "
+                    "(T_prompt=%d, T_full=%d)",
+                    T_ans_i, answer_logits.size(0),
+                    answer_start, logits.size(1),
                 )
 
             all_logits.append(answer_logits.float().cpu())

@@ -248,35 +248,45 @@ def main():
             return_tensors="pt", truncation=False)
         answer_start = prompt_inputs["input_ids"].shape[1]
 
-        full_text = teacher.processor.apply_chat_template(
+        full_conv_text = teacher.processor.apply_chat_template(
             teacher_conv + [{"role": "assistant", "content": answer_text}],
             tokenize=False, add_generation_prompt=False)
-        full_inputs = teacher.processor(
-            text=full_text, images=imgs if imgs else None,
-            return_tensors="pt", truncation=False)
-        T_full = full_inputs["input_ids"].shape[1]
 
-        # How many tokens does the teacher tokenizer assign to the answer?
+        # ── Template diff diagnostic ──────────────────────────────────────────
+        # If the template is correctly including the answer, full_conv_text should
+        # be longer than prompt_text by the length of the answer.
+        text_len_diff = len(full_conv_text) - len(prompt_text)
+        answer_in_full = answer_text[:20] in full_conv_text
+        answer_portion = full_conv_text[len(prompt_text):]
+        answer_portion_ids = teacher_tok(
+            answer_portion, return_tensors="pt", add_special_tokens=False
+        )["input_ids"]
+        T_ans_concat = answer_portion_ids.size(1)
+
+        # How many tokens does the teacher tokenizer assign to the answer text alone?
         ans_tok_ids = teacher_tok.encode(answer_text, add_special_tokens=False)
-        T_ans_approx = T_full - answer_start  # what the slice will produce (excluding last)
 
-        ok_b1 = 0 < answer_start < T_full
-        ok_b2 = T_ans_approx >= 1
-
-        # Decode the actual answer region from the full token sequence
-        answer_region_ids = full_inputs["input_ids"][0, answer_start:].tolist()
-        answer_region_text = teacher_tok.decode(answer_region_ids, skip_special_tokens=True).strip()
-
-        print(f"  sample {i}: T_prompt={answer_start}  T_full={T_full}  "
-              f"T_ans_slice={T_ans_approx}  "
-              f"teacher_answer_tokens={len(ans_tok_ids)}")
+        print(f"  sample {i}: T_prompt={answer_start}")
+        print(f"             template text len diff = {text_len_diff} chars "
+              f"(expected ~{len(answer_text)} chars for the answer)")
+        print(f"             answer text in full_conv_text: {answer_in_full}")
+        print(f"             answer_portion: {repr(answer_portion[:60])}")
+        print(f"             T_ans via concat tokenize = {T_ans_concat}  "
+              f"(answer-only tokens = {len(ans_tok_ids)})")
         print(f"             expected_answer='{answer_text[:50]}'")
-        print(f"             region_decoded ='{answer_region_text[:50]}'")
-        boundary_ok = answer_region_text.strip().startswith(answer_text.strip()[:10]) or \
-                      answer_text.strip()[:10] in answer_region_text
-        icon = PASS if (ok_b1 and ok_b2 and boundary_ok) else FAIL
-        print(f"             {icon} boundary {'OK' if (ok_b1 and ok_b2 and boundary_ok) else 'BAD'}\n")
-        all_passed &= (ok_b1 and ok_b2)
+
+        # Verify the answer portion decodes back to (approximately) the answer
+        decoded_portion = teacher_tok.decode(
+            answer_portion_ids[0].tolist(), skip_special_tokens=True).strip()
+        boundary_ok = (
+            answer_text.strip()[:10] in decoded_portion or
+            decoded_portion[:10] in answer_text.strip()
+        ) and T_ans_concat > 3
+
+        icon = PASS if boundary_ok else FAIL
+        print(f"             {icon} boundary {'OK' if boundary_ok else 'BAD'}  "
+              f"decoded_portion='{decoded_portion[:50]}'\n")
+        all_passed &= boundary_ok
 
     # ══════════════════════════════════════════════════════════════════════════
     if not args.skip_generation:
