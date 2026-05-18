@@ -170,6 +170,7 @@ class SmolVLM2Teacher(BaseTeacher):
                 text=prompt_text,
                 images=imgs if imgs else None,
                 return_tensors="pt",
+                truncation=False,   # SmolVLM2 image tokens are long; never truncate
             )
             answer_start = prompt_inputs["input_ids"].shape[1]  # exact boundary
 
@@ -184,6 +185,7 @@ class SmolVLM2Teacher(BaseTeacher):
                 text=full_text,
                 images=imgs if imgs else None,
                 return_tensors="pt",
+                truncation=False,   # must match prompt tokenisation to get correct answer_start
             )
             inputs = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
                       for k, v in inputs.items()}

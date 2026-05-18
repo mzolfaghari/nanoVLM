@@ -237,6 +237,8 @@ def main():
     t_ans_mask = (t_logits.abs().sum(-1) > 0).float()
 
     for loss_name, loss_fn in LOSS_REGISTRY.items():
+        # DKD can exceed 15 because beta*NCKD is unbounded — only check finite + positive
+        max_val = 200.0 if loss_name == "dkd" else 15.0
         try:
             val = loss_fn(
                 student_logits=s_ans.float(),
@@ -250,11 +252,11 @@ def main():
                 js_teacher_weight=0.1,
                 skew_target_weight=0.1,
             )
-            is_finite  = torch.isfinite(val).item()
-            in_range   = 0.0 < val.item() < 15.0
+            is_finite = torch.isfinite(val).item()
+            in_range  = 0.0 < val.item() < max_val
             ok = check(f"{loss_name:10s}: {val.item():.4f}",
                        is_finite and in_range,
-                       "out of expected range [0, 15]" if not in_range else "")
+                       f"out of expected range [0, {max_val}]" if not in_range else "")
             all_passed &= ok
         except Exception as e:
             check(f"{loss_name:10s}", False, str(e))
