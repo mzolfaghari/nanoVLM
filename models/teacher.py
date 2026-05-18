@@ -106,7 +106,7 @@ class SmolVLM2Teacher(BaseTeacher):
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_id,
-            torch_dtype=dtype,
+            dtype=dtype,
             device_map="auto",
         )
         self.model.eval()
