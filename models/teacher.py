@@ -113,16 +113,6 @@ class SmolVLM2Teacher(BaseTeacher):
         for p in self.model.parameters():
             p.requires_grad_(False)
 
-        # The processor's tokenizer ships with a small model_max_length that
-        # causes it to silently truncate long sequences even when truncation=False
-        # is passed to __call__ (truncation=False only prevents a ValueError;
-        # model_max_length is checked separately in some HF processor versions).
-        # SmolVLM2 image tokens are large (document pages → ~1400 tokens), so we
-        # must raise the limit to the model's actual capacity.
-        model_max_pos = getattr(self.model.config, "max_position_embeddings", 16384)
-        self.processor.tokenizer.model_max_length = model_max_pos
-        logger.info(f"Set processor tokenizer model_max_length={model_max_pos}")
-
     # ── Public API ────────────────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -166,114 +156,57 @@ class SmolVLM2Teacher(BaseTeacher):
                 content.append({"type": "text", "text": ""})
                 teacher_conv.append({"role": "user", "content": content})
 
-            # ── Step 1: tokenise the prompt with images ───────────────────────
-            # apply_chat_template produces text with image-token placeholders;
-            # processor() expands each placeholder into the correct number of
-            # image token IDs (which are determined by the image resolution and
-            # the processor's patch/tile settings).
+            # ── Find answer start by tokenising the prompt-only prefix ────────
+            # This is more robust than searching for a header token pattern,
+            # because special tokens may be merged or encoded differently across
+            # processor versions.  add_generation_prompt=True appends the
+            # assistant header so T_prompt already includes it.
             prompt_text = self.processor.apply_chat_template(
-                teacher_conv,
+                teacher_conv,                    # prompt only, no answer yet
                 tokenize=False,
-                add_generation_prompt=True,      # appends "<|im_start|>assistant\n"
+                add_generation_prompt=True,      # adds "<|im_start|>assistant\n"
             )
             prompt_inputs = self.processor(
                 text=prompt_text,
                 images=imgs if imgs else None,
                 return_tensors="pt",
-                truncation=False,
+                truncation=False,   # SmolVLM2 image tokens are long; never truncate
             )
-            answer_start = prompt_inputs["input_ids"].shape[1]  # T_prompt
+            answer_start = prompt_inputs["input_ids"].shape[1]  # exact boundary
 
-            # ── Step 2: extract answer token IDs without touching the processor ─
-            # Root cause of the T_ans=3 bug: passing the full conversation text
-            # (prompt + answer) back through processor() caused the answer to be
-            # silently dropped (the processor returned exactly T_prompt+3 tokens
-            # regardless of answer length, possibly because apply_chat_template
-            # with add_generation_prompt=False strips the last assistant turn, or
-            # because the processor has its own internal length cap that our
-            # model_max_length override cannot reach).
-            #
-            # Fix: derive the answer-portion text by diffing the full-conversation
-            # template output against the prompt-only template output (both at the
-            # character level), then tokenise that substring directly with the
-            # bare tokenizer — no images, no processor expansion.  This gives the
-            # correct token IDs for the answer (including the closing <|im_end|>\n
-            # that the student is also trained to predict).
-            full_conv_text = self.processor.apply_chat_template(
-                teacher_conv + [{"role": "assistant", "content": answer_text}],
+            # ── Full conversation (prompt + answer) for the teacher forward ───
+            # IMPORTANT: SmolVLM2's Jinja2 chat template always iterates over
+            # message["content"] expecting a list of {"type":..., "text":...} dicts.
+            # Passing a plain string causes the template to iterate over individual
+            # characters — none have a "type" key — so the answer is silently dropped
+            # and only the closing <end_of_utterance> token is emitted.
+            # Using the same list-of-blocks format as the user messages fixes this.
+            teacher_conv_full = teacher_conv + [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": answer_text}],
+            }]
+            full_text = self.processor.apply_chat_template(
+                teacher_conv_full,
                 tokenize=False,
                 add_generation_prompt=False,
             )
-            # full_conv_text  = "...image_placeholders...question...<|im_end|>\n
-            #                    <|im_start|>assistant\n{answer}<|im_end|>\n"
-            # prompt_text     = "...image_placeholders...question...<|im_end|>\n
-            #                    <|im_start|>assistant\n"
-            # answer_portion  =                                       "{answer}<|im_end|>\n"
-            answer_portion = full_conv_text[len(prompt_text):]
-
-            if not answer_portion.strip():
-                logger.warning(
-                    "Empty answer portion after template diff — skipping sample. "
-                    "full_conv_text len=%d, prompt_text len=%d",
-                    len(full_conv_text), len(prompt_text),
-                )
-                all_logits.append(torch.zeros(1, self.base_vocab_size))
-                continue
-
-            answer_ids = self.processor.tokenizer(
-                answer_portion,
+            inputs = self.processor(
+                text=full_text,
+                images=imgs if imgs else None,
                 return_tensors="pt",
-                add_special_tokens=False,
-            )["input_ids"]          # [1, T_ans]
-
-            # ── Step 3: concatenate prompt + answer tokens, single forward pass ─
-            full_input_ids = torch.cat([
-                prompt_inputs["input_ids"].to(teacher_device),
-                answer_ids.to(teacher_device),
-            ], dim=1)
-
-            prompt_attn = prompt_inputs.get(
-                "attention_mask",
-                torch.ones_like(prompt_inputs["input_ids"]),
+                truncation=False,   # must match prompt tokenisation to get correct answer_start
             )
-            full_attn = torch.cat([
-                prompt_attn.to(teacher_device),
-                torch.ones(1, answer_ids.size(1), dtype=torch.long,
-                           device=teacher_device),
-            ], dim=1)
+            inputs = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
+                      for k, v in inputs.items()}
 
-            # Remaining prompt_inputs keys (pixel_values, image_attention_mask,
-            # etc.) are passed as-is — the model uses them together with input_ids
-            # to embed image patches into the sequence.
-            extra = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
-                     for k, v in prompt_inputs.items()
-                     if k not in ("input_ids", "attention_mask")}
+            outputs = self.model(**inputs)
+            logits = outputs.logits  # [1, T_full, V_teacher]
 
-            outputs = self.model(
-                input_ids=full_input_ids,
-                attention_mask=full_attn,
-                **extra,
-            )
-            logits = outputs.logits          # [1, T_prompt+T_ans, V_teacher]
-
-            # ── Step 4: extract answer logits ─────────────────────────────────
-            # logits[t] predicts token[t+1].  Answer tokens occupy positions
-            # [answer_start .. answer_start+T_ans-1], so the predicting logits
-            # are at [answer_start-1 .. answer_start+T_ans-2].
-            T_ans_i = answer_ids.size(1)
-            answer_logits = logits[
-                0,
-                answer_start - 1 : answer_start - 1 + T_ans_i,
-                :self.base_vocab_size,
-            ]                                # [T_ans_i, base_vocab_size]
-
-            if answer_logits.size(0) != T_ans_i:
-                logger.warning(
-                    "answer_logits shape mismatch: expected %d, got %d "
-                    "(T_prompt=%d, T_full=%d)",
-                    T_ans_i, answer_logits.size(0),
-                    answer_start, logits.size(1),
-                )
+            # Causal LM convention: logits[t] predicts token[t+1].
+            # Answer tokens are at positions [answer_start : T_full].
+            # The logits that predict them are at [answer_start-1 : T_full-1].
+            answer_logits = logits[0, answer_start - 1 : -1, :self.base_vocab_size]
+            # Shape: [T_answer_i, base_vocab_size]
 
             all_logits.append(answer_logits.float().cpu())
 

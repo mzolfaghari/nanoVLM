@@ -249,7 +249,8 @@ def main():
         answer_start = prompt_inputs["input_ids"].shape[1]
 
         full_conv_text = teacher.processor.apply_chat_template(
-            teacher_conv + [{"role": "assistant", "content": answer_text}],
+            teacher_conv + [{"role": "assistant",
+                             "content": [{"type": "text", "text": answer_text}]}],
             tokenize=False, add_generation_prompt=False)
 
         # ── Template diff diagnostic ──────────────────────────────────────────
