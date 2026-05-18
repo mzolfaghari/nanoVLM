@@ -113,6 +113,16 @@ class SmolVLM2Teacher(BaseTeacher):
         for p in self.model.parameters():
             p.requires_grad_(False)
 
+        # The processor's tokenizer ships with a small model_max_length that
+        # causes it to silently truncate long sequences even when truncation=False
+        # is passed to __call__ (truncation=False only prevents a ValueError;
+        # model_max_length is checked separately in some HF processor versions).
+        # SmolVLM2 image tokens are large (document pages → ~1400 tokens), so we
+        # must raise the limit to the model's actual capacity.
+        model_max_pos = getattr(self.model.config, "max_position_embeddings", 16384)
+        self.processor.tokenizer.model_max_length = model_max_pos
+        logger.info(f"Set processor tokenizer model_max_length={model_max_pos}")
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     @torch.no_grad()
@@ -198,6 +208,19 @@ class SmolVLM2Teacher(BaseTeacher):
             # The logits that predict them are at [answer_start-1 : T_full-1].
             answer_logits = logits[0, answer_start - 1 : -1, :self.base_vocab_size]
             # Shape: [T_answer_i, base_vocab_size]
+
+            # Sanity: warn if the answer slice is much shorter than expected.
+            # Typical cause: tokenizer truncated the full sequence despite
+            # truncation=False.  This means image tokens filled most of the
+            # context window and the answer was cut off.
+            T_ans_i = answer_logits.size(0)
+            T_full_i = logits.size(1)
+            if T_ans_i < 4 and (T_full_i - answer_start) < 4:
+                logger.warning(
+                    "Very short answer logits (T_ans=%d, T_full=%d, answer_start=%d). "
+                    "Possible truncation — check model_max_length vs image token count.",
+                    T_ans_i, T_full_i, answer_start,
+                )
 
             all_logits.append(answer_logits.float().cpu())
 
