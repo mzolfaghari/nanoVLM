@@ -180,6 +180,10 @@ def main():
         sample_logprobs = []
         for pos in range(min(len(gt_ids_incontext), T_ans)):
             gt_tok    = gt_ids_incontext[pos]
+            # Skip special tokens above base_vocab_size (e.g. <end_of_utterance>=49279)
+            # — they are truncated out of the teacher logit tensor intentionally.
+            if gt_tok >= distill_cfg.base_vocab_size:
+                continue
             logit_row = t_logits[0, pos]
             sorted_ids = logit_row.argsort(descending=True)
             rank = (sorted_ids == gt_tok).nonzero(as_tuple=False)
