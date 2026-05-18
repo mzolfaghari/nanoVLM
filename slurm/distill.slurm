@@ -88,5 +88,5 @@ srun torchrun \
     --max_sample_length 2048 \
     --batch_size 2 \
     --gradient_accumulation_steps 8 \
-    --max_training_steps 40000 \
+    --max_training_steps 5000 \
     --eval_interval 500

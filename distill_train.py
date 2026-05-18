@@ -346,6 +346,10 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
             },
             name=run_name,
         )
+        # Register a custom x-axis for lmms-eval metrics so they plot correctly
+        # against training step rather than the wandb internal step counter.
+        lmms_eval_step = "<lmms-eval-step>"
+        run.define_metric(name="lmms_eval/*", step_metric=lmms_eval_step)
 
     # ── Device ────────────────────────────────────────────────────────────────
     device = (
@@ -718,6 +722,21 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                         print(f"Step {global_step}: val_loss={avg_val_loss:.4f}  "
                               f"checkpoint saved to {checkpoint_path_step}")
 
+                        # ── lmms-eval: submit an async benchmark job every
+                        # eval_interval*2 steps so we don't saturate the cluster.
+                        if train_cfg.use_lmms_eval and global_step % (train_cfg.eval_interval * 2) == 0:
+                            cmd = (
+                                f"sbatch eval.slurm "
+                                f"{checkpoint_path_step} "
+                                f"{global_step} "
+                                f"{run_name} "
+                                f"{train_cfg.lmms_eval_limit} "
+                                f"{train_cfg.lmms_eval_tasks} "
+                                f"{train_cfg.lmms_eval_batch_size}"
+                            )
+                            print(f"Submitting lmms-eval job: {cmd}")
+                            subprocess.run(cmd, shell=True)
+
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         if is_master():
@@ -760,6 +779,32 @@ def distill_train(train_cfg, vlm_cfg, distill_cfg):
                             "train/top1_agreement":  avg_agree,
                             **{f"training_stats/{k}": v for k, v in stats.items()},
                         }, step=global_step)
+
+                        # ── Poll for completed lmms-eval result files and log them
+                        eval_results_dir = os.path.join("eval_results", run_name)
+                        if os.path.exists(eval_results_dir):
+                            logged_results_count = 0
+                            for result_file in os.listdir(eval_results_dir):
+                                match = re.fullmatch(r"step_(\d+)\.json", result_file)
+                                if not match:
+                                    continue
+                                try:
+                                    step = int(match.group(1))
+                                    if step not in logged_eval_steps:
+                                        with open(os.path.join(eval_results_dir, result_file)) as f:
+                                            eval_data = json.load(f)
+                                        lmms_results = eval_data.get("results", {})
+                                        if lmms_results:
+                                            metrics = {f"lmms_eval/{k}": v for k, v in lmms_results.items()}
+                                            metrics[lmms_eval_step] = eval_data["global_step"]
+                                            if logged_results_count > 0:
+                                                print(f"Logging more than one lmms-eval result at step {global_step}")
+                                            run.log(metrics, step=global_step + logged_results_count)
+                                            logged_results_count += 1
+                                            print(f"Logged lmms-eval results from step {eval_data['global_step']}")
+                                        logged_eval_steps.add(step)
+                                except (ValueError, KeyError, json.JSONDecodeError) as e:
+                                    print(f"Warning: could not parse {result_file}: {e}")
 
                 for key in accumulated_stats:
                     accumulated_stats[key] = []
@@ -816,6 +861,11 @@ def main():
     parser.add_argument("--vlm_checkpoint_path",    type=str)
     parser.add_argument("--compile",                type=bool)
     parser.add_argument("--no_log_wandb",           action="store_true")
+    parser.add_argument("--use_lmms_eval",          action="store_true",
+                        help="Submit lmms-eval benchmark jobs every 2×eval_interval steps")
+    parser.add_argument("--lmms_eval_tasks",        type=str)
+    parser.add_argument("--lmms_eval_limit",        type=float)
+    parser.add_argument("--lmms_eval_batch_size",   type=int)
     parser.add_argument("--resume_from_vlm_checkpoint", action="store_true")
     parser.add_argument("--train_dataset_path",     type=str)
     parser.add_argument("--train_dataset_name",     type=str)
@@ -873,6 +923,14 @@ def main():
         train_cfg.compile = args.compile
     if args.no_log_wandb:
         train_cfg.log_wandb = False
+    if args.use_lmms_eval:
+        train_cfg.use_lmms_eval = True
+    if args.lmms_eval_tasks is not None:
+        train_cfg.lmms_eval_tasks = args.lmms_eval_tasks
+    if args.lmms_eval_limit is not None:
+        train_cfg.lmms_eval_limit = args.lmms_eval_limit
+    if args.lmms_eval_batch_size is not None:
+        train_cfg.lmms_eval_batch_size = args.lmms_eval_batch_size
     if args.resume_from_vlm_checkpoint:
         train_cfg.resume_from_vlm_checkpoint = True
         vlm_cfg.vlm_load_backbone_weights = False
